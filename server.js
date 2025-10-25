@@ -693,7 +693,7 @@ app.use((err, req, res, next) => {
 // ============================================================================
 
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0' , () => {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`🚀 SIAV Backend Server v2.0.0 (Supabase Edition)`);
   console.log(`${'='.repeat(60)}`);
