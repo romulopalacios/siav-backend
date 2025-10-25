@@ -41,14 +41,19 @@ try {
 // ============================================================================
 
 const app = express();
-app.use(express.json());
+const cors = require('cors');
 
-// CORS para desarrollo (opcional)
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  next();
-});
+// Middlewares
+app.use(express.json()); // Para parsear JSON en el body
+app.use(express.urlencoded({ extended: true })); // Para parsear form data
+
+// CORS para desarrollo
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 
 // ============================================================================
 // CONFIGURACIÓN DE MQTT
@@ -90,15 +95,69 @@ mqttClient.on('reconnect', () => {
 mqttClient.on('message', async (topic, message) => {
   try {
     const evento = JSON.parse(message.toString());
+    
+    // ✅ VALIDACIÓN DE INTEGRIDAD DE DATOS
+    if (!evento.dispositivo_id || typeof evento.dispositivo_id !== 'string') {
+      console.error('❌ Evento rechazado: dispositivo_id inválido');
+      return;
+    }
+    
+    if (typeof evento.velocidad !== 'number' || evento.velocidad < 0 || evento.velocidad > 300) {
+      console.error(`❌ Evento rechazado: velocidad inválida (${evento.velocidad})`);
+      return;
+    }
+    
+    if (!['norte', 'sur'].includes(evento.direccion)) {
+      console.error(`❌ Evento rechazado: dirección inválida (${evento.direccion})`);
+      return;
+    }
+    
+    if (typeof evento.esInfraccion !== 'boolean') {
+      console.error(`❌ Evento rechazado: esInfraccion debe ser booleano (${evento.esInfraccion})`);
+      return;
+    }
+    
+    // Validar timestamp si existe
+    let timestampValido = new Date().toISOString();
+    if (evento.timestamp) {
+      try {
+        const fechaEvento = new Date(evento.timestamp);
+        if (!isNaN(fechaEvento.getTime())) {
+          timestampValido = fechaEvento.toISOString();
+        } else {
+          console.warn(`⚠️  Timestamp inválido, usando fecha actual`);
+        }
+      } catch (err) {
+        console.warn(`⚠️  Error parseando timestamp, usando fecha actual`);
+      }
+    }
+    
+    // Validar ubicación si existe
+    if (evento.ubicacion) {
+      if (typeof evento.ubicacion.lat !== 'number' || 
+          typeof evento.ubicacion.lng !== 'number' ||
+          evento.ubicacion.lat < -90 || evento.ubicacion.lat > 90 ||
+          evento.ubicacion.lng < -180 || evento.ubicacion.lng > 180) {
+        console.warn(`⚠️  Ubicación inválida, ignorando`);
+        evento.ubicacion = null;
+      }
+    }
+    
     console.log(`\n📨 Received event from ${topic}:`);
     console.log(`   Device: ${evento.dispositivo_id}`);
     console.log(`   Speed: ${evento.velocidad} km/h`);
     console.log(`   Direction: ${evento.direccion}`);
     console.log(`   Infraction: ${evento.esInfraccion ? '🚨 YES' : '✅ NO'}`);
     
-    // Escribir en Firestore
+    // Escribir en Firestore con datos validados
     const docRef = await db.collection('eventos_trafico').add({
-      ...evento,
+      dispositivo_id: evento.dispositivo_id,
+      velocidad: parseFloat(evento.velocidad),
+      direccion: evento.direccion,
+      esInfraccion: Boolean(evento.esInfraccion),
+      timestamp: timestampValido,
+      ubicacion: evento.ubicacion || null,
+      limiteVelocidad: typeof evento.limiteVelocidad === 'number' ? evento.limiteVelocidad : 50,
       procesado: false,
       recibidoEn: admin.firestore.FieldValue.serverTimestamp()
     });
@@ -106,15 +165,15 @@ mqttClient.on('message', async (topic, message) => {
     console.log(`✅ Event saved to Firestore: ${docRef.id}`);
     
     // Si es infracción, crear registro especial
-    if (evento.esInfraccion) {
+    if (evento.esInfraccion === true) {
       await db.collection('infracciones').add({
         eventoId: docRef.id,
-        velocidad: evento.velocidad,
+        velocidad: parseFloat(evento.velocidad),
         direccion: evento.direccion,
-        ubicacion: evento.ubicacion,
+        ubicacion: evento.ubicacion || null,
         dispositivo_id: evento.dispositivo_id,
-        timestamp: evento.timestamp,
-        limiteVelocidad: evento.limiteVelocidad,
+        timestamp: timestampValido,
+        limiteVelocidad: typeof evento.limiteVelocidad === 'number' ? evento.limiteVelocidad : 50,
         notificada: false,
         creadoEn: admin.firestore.FieldValue.serverTimestamp()
       });
@@ -122,6 +181,9 @@ mqttClient.on('message', async (topic, message) => {
     }
   } catch (error) {
     console.error('❌ Error processing message:', error.message);
+    if (error.stack) {
+      console.error('Stack trace:', error.stack);
+    }
   }
 });
 
@@ -129,11 +191,12 @@ mqttClient.on('message', async (topic, message) => {
 // REST API ENDPOINTS
 // ============================================================================
 
-// Health check
-app.get('/', (req, res) => {
-  res.json({
+// Health check mejorado
+app.get('/', async (req, res) => {
+  const health = {
     status: 'SIAV Backend Running',
-    version: '1.0.0',
+    version: '1.0.1',
+    timestamp: new Date().toISOString(),
     mqtt: {
       connected: mqttClient.connected,
       broker: MQTT_BROKER,
@@ -142,8 +205,24 @@ app.get('/', (req, res) => {
     firebase: {
       connected: !!db
     },
-    uptime: process.uptime()
-  });
+    uptime: Math.round(process.uptime()),
+    memory: {
+      used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+      unit: 'MB'
+    }
+  };
+  
+  // Test de conectividad a Firestore (opcional, no bloquea)
+  try {
+    await db.collection('eventos_trafico').limit(1).get();
+    health.firebase.readable = true;
+  } catch (error) {
+    health.firebase.readable = false;
+    health.firebase.error = error.message;
+  }
+  
+  res.json(health);
 });
 
 // Obtener estadísticas en tiempo real
@@ -154,19 +233,33 @@ app.get('/stats', async (req, res) => {
       db.collection('infracciones').count().get()
     ]);
     
+    const totalDetecciones = eventosSnapshot.data().count;
+    const totalInfracciones = infraccionesSnapshot.data().count;
+    
     res.json({
-      totalEventos: eventosSnapshot.data().count,
-      totalInfracciones: infraccionesSnapshot.data().count
+      totalDetecciones,
+      totalInfracciones,
+      porcentajeInfracciones: totalDetecciones > 0 ? 
+        Math.round((totalInfracciones / totalDetecciones) * 100) : 0,
+      timestamp: new Date().toISOString()
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error en /stats:', error);
+    res.status(500).json({ 
+      error: 'Error al obtener estadísticas',
+      message: error.message 
+    });
   }
 });
 
 // Obtener últimos eventos
 app.get('/eventos/recientes', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 10;
+    // Validar y sanitizar el parámetro limit
+    let limit = parseInt(req.query.limit) || 10;
+    if (limit < 1) limit = 10;
+    if (limit > 100) limit = 100; // Máximo 100 para evitar sobrecarga
+    
     const snapshot = await db.collection('eventos_trafico')
       .orderBy('recibidoEn', 'desc')
       .limit(limit)
@@ -174,12 +267,20 @@ app.get('/eventos/recientes', async (req, res) => {
     
     const eventos = [];
     snapshot.forEach(doc => {
-      eventos.push({ id: doc.id, ...doc.data() });
+      const data = doc.data();
+      // Asegurar que los datos críticos existen antes de enviar
+      if (data.velocidad !== undefined && data.dispositivo_id) {
+        eventos.push({ id: doc.id, ...data });
+      }
     });
     
     res.json(eventos);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error en /eventos/recientes:', error);
+    res.status(500).json({ 
+      error: 'Error al obtener eventos',
+      message: error.message 
+    });
   }
 });
 
@@ -204,23 +305,46 @@ app.get('/generar-reporte', async (req, res) => {
         success: true,
         message: 'No events found for this date',
         fecha,
-        totalEventos: 0
+        totalDetecciones: 0,
+        totalInfracciones: 0,
+        porcentajeInfracciones: 0
       });
     }
     
-    let totalEventos = 0;
+    let totalDetecciones = 0;
     let totalInfracciones = 0;
     let velocidades = [];
     let direcciones = { norte: 0, sur: 0 };
     
     snapshot.forEach(doc => {
       const evento = doc.data();
-      totalEventos++;
-      if (evento.esInfraccion) totalInfracciones++;
+      
+      // Validar datos antes de procesarlos
+      if (typeof evento.velocidad !== 'number' || evento.velocidad < 0 || evento.velocidad > 300) {
+        console.warn(`⚠️  Evento ${doc.id} con velocidad inválida:`, evento.velocidad);
+        return; // Saltar este evento
+      }
+      
+      totalDetecciones++;
+      if (evento.esInfraccion === true) totalInfracciones++;
       velocidades.push(evento.velocidad);
+      
+      // Validar dirección antes de contar
       if (evento.direccion === 'norte') direcciones.norte++;
-      else direcciones.sur++;
+      else if (evento.direccion === 'sur') direcciones.sur++;
     });
+    
+    // Validar que haya velocidades válidas antes de calcular
+    if (velocidades.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No valid data found for this date',
+        fecha,
+        totalDetecciones: 0,
+        totalInfracciones: 0,
+        porcentajeInfracciones: 0
+      });
+    }
     
     const velocidadPromedio = velocidades.reduce((a, b) => a + b, 0) / velocidades.length;
     const velocidadMaxima = Math.max(...velocidades);
@@ -228,9 +352,9 @@ app.get('/generar-reporte', async (req, res) => {
     
     const reporte = {
       fecha: admin.firestore.Timestamp.fromDate(inicio),
-      totalEventos,
+      totalDetecciones,
       totalInfracciones,
-      porcentajeInfracciones: ((totalInfracciones / totalEventos) * 100).toFixed(2),
+      porcentajeInfracciones: parseFloat(((totalInfracciones / totalDetecciones) * 100).toFixed(2)),
       velocidadPromedio: Math.round(velocidadPromedio * 100) / 100,
       velocidadMaxima,
       velocidadMinima,
@@ -240,7 +364,7 @@ app.get('/generar-reporte', async (req, res) => {
     
     await db.collection('reportes_diarios').doc(fecha).set(reporte);
     
-    console.log(`✅ Report generated: ${totalEventos} events, ${totalInfracciones} infractions`);
+    console.log(`✅ Report generated: ${totalDetecciones} detections, ${totalInfracciones} infractions`);
     
     res.json({
       success: true,
@@ -256,9 +380,14 @@ app.get('/generar-reporte', async (req, res) => {
 // Obtener reportes históricos
 app.get('/reportes', async (req, res) => {
   try {
+    // Validar parámetro de límite opcional
+    let limit = parseInt(req.query.limit) || 30;
+    if (limit < 1) limit = 30;
+    if (limit > 90) limit = 90; // Máximo 90 días
+    
     const snapshot = await db.collection('reportes_diarios')
       .orderBy('fecha', 'desc')
-      .limit(30)
+      .limit(limit)
       .get();
     
     const reportes = [];
@@ -268,7 +397,11 @@ app.get('/reportes', async (req, res) => {
     
     res.json(reportes);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error en /reportes:', error);
+    res.status(500).json({ 
+      error: 'Error al obtener reportes',
+      message: error.message 
+    });
   }
 });
 
@@ -280,7 +413,11 @@ app.get('/reportes', async (req, res) => {
 // Endpoint compatible con el dashboard: /api/eventos
 app.get('/api/eventos', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 100;
+    // Validar y sanitizar el parámetro limit
+    let limit = parseInt(req.query.limit) || 100;
+    if (limit < 1) limit = 100;
+    if (limit > 500) limit = 500; // Máximo 500 para dashboard
+    
     const snapshot = await db.collection('eventos_trafico')
       .orderBy('recibidoEn', 'desc')
       .limit(limit)
@@ -289,18 +426,24 @@ app.get('/api/eventos', async (req, res) => {
     const eventos = [];
     snapshot.forEach(doc => {
       const data = doc.data();
+      
+      // Solo incluir eventos con datos válidos
+      if (typeof data.velocidad !== 'number' || !data.dispositivo_id) {
+        return;
+      }
+      
       // Transformar al formato esperado por el frontend
       eventos.push({
         id: doc.id,
         timestamp: data.timestamp ? new Date(data.timestamp).getTime() : Date.now(),
-        velocidad: data.velocidad || 0,
+        velocidad: data.velocidad,
         direccion: data.direccion || 'N/A',
         ubicacion: data.ubicacion || {
           lat: -0.9549,
           lng: -80.7288,
           nombre: 'Ubicación desconocida'
         },
-        esInfraccion: data.esInfraccion || false,
+        esInfraccion: Boolean(data.esInfraccion),
         limiteVelocidad: data.limiteVelocidad || 50,
         fecha: data.timestamp || new Date().toISOString(),
         dispositivo_id: data.dispositivo_id
@@ -310,7 +453,10 @@ app.get('/api/eventos', async (req, res) => {
     res.json(eventos);
   } catch (error) {
     console.error('Error en /api/eventos:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: 'Error al obtener eventos',
+      message: error.message 
+    });
   }
 });
 
@@ -323,22 +469,29 @@ app.get('/api/estadisticas', async (req, res) => {
       .limit(100)
       .get();
     
-    let totalVehiculos = 0;
+    let totalDetecciones = 0;
     let totalInfracciones = 0;
     let sumaVelocidades = 0;
     
     snapshot.forEach(doc => {
       const evento = doc.data();
-      totalVehiculos++;
-      if (evento.esInfraccion) totalInfracciones++;
-      sumaVelocidades += evento.velocidad || 0;
+      
+      // Validar que los datos críticos existan
+      if (typeof evento.velocidad !== 'number' || evento.velocidad < 0) {
+        console.warn(`⚠️  Evento ${doc.id} con velocidad inválida:`, evento.velocidad);
+        return; // Saltar este evento
+      }
+      
+      totalDetecciones++;
+      if (evento.esInfraccion === true) totalInfracciones++;
+      sumaVelocidades += evento.velocidad;
     });
     
     res.json({
-      totalVehiculos,
-      velocidadPromedio: totalVehiculos > 0 ? Math.round(sumaVelocidades / totalVehiculos) : 0,
+      totalDetecciones,
+      velocidadPromedio: totalDetecciones > 0 ? Math.round(sumaVelocidades / totalDetecciones) : 0,
       totalInfracciones,
-      porcentajeInfracciones: totalVehiculos > 0 ? Math.round((totalInfracciones / totalVehiculos) * 100) : 0,
+      porcentajeInfracciones: totalDetecciones > 0 ? Math.round((totalInfracciones / totalDetecciones) * 100) : 0,
       ultimaActualizacion: new Date().toISOString()
     });
   } catch (error) {
@@ -364,30 +517,36 @@ app.get('/api/graficos', async (req, res) => {
     
     snapshot.forEach(doc => {
       const evento = doc.data();
+      
+      // Validar datos antes de procesarlos
+      if (typeof evento.velocidad !== 'number' || evento.velocidad < 0) {
+        return; // Saltar eventos con datos inválidos
+      }
+      
       const fecha = evento.recibidoEn ? evento.recibidoEn.toDate() : new Date();
       const hora = `${fecha.getHours().toString().padStart(2, '0')}:00`;
       
       if (!datosPorHora[hora]) {
         datosPorHora[hora] = {
-          vehiculos: 0,
+          detecciones: 0,
           infracciones: 0,
           velocidades: []
         };
       }
       
-      datosPorHora[hora].vehiculos++;
-      if (evento.esInfraccion) datosPorHora[hora].infracciones++;
-      datosPorHora[hora].velocidades.push(evento.velocidad || 0);
+      datosPorHora[hora].detecciones++;
+      if (evento.esInfraccion === true) datosPorHora[hora].infracciones++;
+      datosPorHora[hora].velocidades.push(evento.velocidad);
     });
     
     // Convertir a array y calcular promedios
     const graficos = Object.entries(datosPorHora).map(([hora, datos]) => ({
       hora,
-      vehiculos: datos.vehiculos,
+      detecciones: datos.detecciones,
       infracciones: datos.infracciones,
-      velocidadPromedio: Math.round(
+      velocidadPromedio: datos.velocidades.length > 0 ? Math.round(
         datos.velocidades.reduce((sum, v) => sum + v, 0) / datos.velocidades.length
-      )
+      ) : 0
     }));
     
     // Ordenar por hora y tomar las últimas 12
@@ -402,24 +561,81 @@ app.get('/api/graficos', async (req, res) => {
 
 
 // ============================================================================
+// MIDDLEWARE DE MANEJO DE ERRORES GLOBAL
+// ============================================================================
+
+// Manejo de rutas no encontradas
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Endpoint not found',
+    path: req.path,
+    method: req.method,
+    availableEndpoints: [
+      'GET /',
+      'GET /stats',
+      'GET /eventos/recientes',
+      'GET /generar-reporte',
+      'GET /reportes',
+      'GET /api/eventos',
+      'GET /api/estadisticas',
+      'GET /api/graficos'
+    ]
+  });
+});
+
+// Manejo de errores global
+app.use((err, req, res, next) => {
+  console.error('❌ Error no manejado:', err);
+  res.status(500).json({
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? err.message : 'An error occurred'
+  });
+});
+
+// ============================================================================
 // SERVER STARTUP
 // ============================================================================
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`🚀 SIAV Backend Server running on port ${PORT}`);
+  console.log(`🚀 SIAV Backend Server v1.0.1`);
   console.log(`${'='.repeat(60)}`);
-  console.log(`📍 Health check: http://localhost:${PORT}/`);
-  console.log(`📊 Statistics:   http://localhost:${PORT}/stats`);
-  console.log(`📋 Recent events: http://localhost:${PORT}/eventos/recientes`);
+  console.log(`📍 Health check:    http://localhost:${PORT}/`);
+  console.log(`📊 Statistics:      http://localhost:${PORT}/stats`);
+  console.log(`📋 Recent events:   http://localhost:${PORT}/eventos/recientes`);
   console.log(`📈 Generate report: http://localhost:${PORT}/generar-reporte`);
+  console.log(`📑 Reports:         http://localhost:${PORT}/reportes`);
+  console.log(`\n🎯 API Dashboard:`);
+  console.log(`   Events:          http://localhost:${PORT}/api/eventos`);
+  console.log(`   Statistics:      http://localhost:${PORT}/api/estadisticas`);
+  console.log(`   Charts:          http://localhost:${PORT}/api/graficos`);
   console.log(`${'='.repeat(60)}\n`);
+  console.log(`✅ Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`✅ MQTT Broker: ${MQTT_BROKER}`);
+  console.log(`✅ Firebase: Connected\n`);
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n⏹️  Shutting down gracefully...');
-  mqttClient.end();
-  process.exit(0);
-});
+const gracefulShutdown = (signal) => {
+  console.log(`\n⏹️  ${signal} received, shutting down gracefully...`);
+  
+  server.close(() => {
+    console.log('✅ HTTP server closed');
+    
+    mqttClient.end(false, () => {
+      console.log('✅ MQTT client disconnected');
+      
+      process.exit(0);
+    });
+  });
+  
+  // Forzar cierre después de 10 segundos
+  setTimeout(() => {
+    console.error('⚠️  Forcing shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+};
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
