@@ -273,6 +273,135 @@ app.get('/reportes', async (req, res) => {
 });
 
 // ============================================================================
+// ENDPOINTS ADICIONALES PARA INTEGRACIÓN CON DASHBOARD
+// ============================================================================
+// Agregar estos endpoints después de los existentes en server.js
+
+// Endpoint compatible con el dashboard: /api/eventos
+app.get('/api/eventos', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 100;
+    const snapshot = await db.collection('eventos_trafico')
+      .orderBy('recibidoEn', 'desc')
+      .limit(limit)
+      .get();
+    
+    const eventos = [];
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      // Transformar al formato esperado por el frontend
+      eventos.push({
+        id: doc.id,
+        timestamp: data.timestamp ? new Date(data.timestamp).getTime() : Date.now(),
+        velocidad: data.velocidad || 0,
+        direccion: data.direccion || 'N/A',
+        ubicacion: data.ubicacion || {
+          lat: -0.9549,
+          lng: -80.7288,
+          nombre: 'Ubicación desconocida'
+        },
+        esInfraccion: data.esInfraccion || false,
+        limiteVelocidad: data.limiteVelocidad || 50,
+        fecha: data.timestamp || new Date().toISOString(),
+        dispositivo_id: data.dispositivo_id
+      });
+    });
+    
+    res.json(eventos);
+  } catch (error) {
+    console.error('Error en /api/eventos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint de estadísticas compatible con el dashboard
+app.get('/api/estadisticas', async (req, res) => {
+  try {
+    // Obtener últimos 100 eventos para calcular estadísticas
+    const snapshot = await db.collection('eventos_trafico')
+      .orderBy('recibidoEn', 'desc')
+      .limit(100)
+      .get();
+    
+    let totalVehiculos = 0;
+    let totalInfracciones = 0;
+    let sumaVelocidades = 0;
+    
+    snapshot.forEach(doc => {
+      const evento = doc.data();
+      totalVehiculos++;
+      if (evento.esInfraccion) totalInfracciones++;
+      sumaVelocidades += evento.velocidad || 0;
+    });
+    
+    res.json({
+      totalVehiculos,
+      velocidadPromedio: totalVehiculos > 0 ? Math.round(sumaVelocidades / totalVehiculos) : 0,
+      totalInfracciones,
+      porcentajeInfracciones: totalVehiculos > 0 ? Math.round((totalInfracciones / totalVehiculos) * 100) : 0,
+      ultimaActualizacion: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error en /api/estadisticas:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Endpoint de datos para gráficos
+app.get('/api/graficos', async (req, res) => {
+  try {
+    // Obtener eventos de las últimas 24 horas
+    const hace24h = new Date();
+    hace24h.setHours(hace24h.getHours() - 24);
+    
+    const snapshot = await db.collection('eventos_trafico')
+      .where('recibidoEn', '>=', admin.firestore.Timestamp.fromDate(hace24h))
+      .orderBy('recibidoEn', 'asc')
+      .get();
+    
+    // Agrupar por hora
+    const datosPorHora = {};
+    
+    snapshot.forEach(doc => {
+      const evento = doc.data();
+      const fecha = evento.recibidoEn ? evento.recibidoEn.toDate() : new Date();
+      const hora = `${fecha.getHours().toString().padStart(2, '0')}:00`;
+      
+      if (!datosPorHora[hora]) {
+        datosPorHora[hora] = {
+          vehiculos: 0,
+          infracciones: 0,
+          velocidades: []
+        };
+      }
+      
+      datosPorHora[hora].vehiculos++;
+      if (evento.esInfraccion) datosPorHora[hora].infracciones++;
+      datosPorHora[hora].velocidades.push(evento.velocidad || 0);
+    });
+    
+    // Convertir a array y calcular promedios
+    const graficos = Object.entries(datosPorHora).map(([hora, datos]) => ({
+      hora,
+      vehiculos: datos.vehiculos,
+      infracciones: datos.infracciones,
+      velocidadPromedio: Math.round(
+        datos.velocidades.reduce((sum, v) => sum + v, 0) / datos.velocidades.length
+      )
+    }));
+    
+    // Ordenar por hora y tomar las últimas 12
+    graficos.sort((a, b) => a.hora.localeCompare(b.hora));
+    
+    res.json(graficos.slice(-12));
+  } catch (error) {
+    console.error('Error en /api/graficos:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
 // SERVER STARTUP
 // ============================================================================
 
