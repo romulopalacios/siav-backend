@@ -1,0 +1,11 @@
+# Railway ignore file
+.git/
+.vscode/
+.idea/
+*.log
+*.md
+.env.local
+.env.production
+node_modules/
+README.md
+.gitignore

@@ -1,13 +1,17 @@
 # Dependencies
 node_modules/
-package-lock.json
 
 # Environment variables
 .env
 .env.local
 .env.production
 
-# Firebase credentials
+# Backups and migration files
+*-backup.js
+*-firebase-backup.js
+MIGRACION-*.md
+RESUMEN-*.md
+supabase-schema.sql
 serviceAccountKey.json
 firebase-adminsdk-*.json
 
@@ -15,6 +19,8 @@ firebase-adminsdk-*.json
 logs/
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # OS
 .DS_Store
@@ -25,3 +31,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Railway
+.railway/
