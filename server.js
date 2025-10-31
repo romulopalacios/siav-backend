@@ -1,6 +1,8 @@
 const mqtt = require('mqtt');
 const { createClient } = require('@supabase/supabase-js');
 const express = require('express');
+const swaggerUi = require('swagger-ui-express');
+const swaggerDocument = require('./swagger.json');
 require('dotenv').config();
 
 // ============================================================================
@@ -43,6 +45,12 @@ app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Swagger UI
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument, {
+  customCss: '.swagger-ui .topbar { display: none }',
+  customSiteTitle: 'SIAV Backend API Documentation'
 }));
 
 // ============================================================================
@@ -660,6 +668,11 @@ app.get('/api/graficos', async (req, res) => {
 // MIDDLEWARE DE MANEJO DE ERRORES GLOBAL
 // ============================================================================
 
+// Endpoint para servir el swagger.json
+app.get('/swagger.json', (req, res) => {
+  res.json(swaggerDocument);
+});
+
 // Manejo de rutas no encontradas
 app.use((req, res) => {
   res.status(404).json({
@@ -674,7 +687,9 @@ app.use((req, res) => {
       'GET /reportes',
       'GET /api/eventos',
       'GET /api/estadisticas',
-      'GET /api/graficos'
+      'GET /api/graficos',
+      'GET /api-docs',
+      'GET /swagger.json'
     ]
   });
 });
@@ -706,6 +721,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`   Events:          http://localhost:${PORT}/api/eventos`);
   console.log(`   Statistics:      http://localhost:${PORT}/api/estadisticas`);
   console.log(`   Charts:          http://localhost:${PORT}/api/graficos`);
+  console.log(`\n📚 API Documentation:`);
+  console.log(`   Swagger UI:      http://localhost:${PORT}/api-docs`);
+  console.log(`   OpenAPI JSON:    http://localhost:${PORT}/swagger.json`);
   console.log(`${'='.repeat(60)}`);
   console.log(`✅ Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`✅ MQTT Broker: ${MQTT_BROKER}`);

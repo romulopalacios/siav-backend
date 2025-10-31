@@ -1,0 +1,777 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "SIAV Backend API",
+    "version": "2.0.0",
+    "description": "Sistema Inteligente de Análisis Vehicular - API REST para monitoreo de tráfico en tiempo real",
+    "contact": {
+      "name": "SIAV Team",
+      "email": "support@siav.com"
+    },
+    "license": {
+      "name": "ISC",
+      "url": "https://opensource.org/licenses/ISC"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Servidor de desarrollo local"
+    },
+    {
+      "url": "https://siav-backend.railway.app",
+      "description": "Servidor de producción (Railway)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health",
+      "description": "Endpoints de estado del sistema"
+    },
+    {
+      "name": "Estadísticas",
+      "description": "Estadísticas y métricas del sistema"
+    },
+    {
+      "name": "Eventos",
+      "description": "Gestión de eventos de tráfico"
+    },
+    {
+      "name": "Reportes",
+      "description": "Generación y consulta de reportes"
+    },
+    {
+      "name": "Dashboard API",
+      "description": "Endpoints específicos para integración con dashboard frontend"
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Health check del servidor",
+        "description": "Retorna el estado de salud del servidor, incluyendo información de conectividad MQTT, Supabase, caché y uso de memoria",
+        "responses": {
+          "200": {
+            "description": "Estado del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheck"
+                },
+                "example": {
+                  "status": "SIAV Backend Running",
+                  "version": "2.0.0",
+                  "database": "Supabase PostgreSQL",
+                  "timestamp": "2025-10-31T12:00:00.000Z",
+                  "mqtt": {
+                    "connected": true,
+                    "broker": "mqtt://test.mosquitto.org:1883",
+                    "topic": "siav/eventos/test"
+                  },
+                  "supabase": {
+                    "connected": true,
+                    "url": "https://xxxxx.supabase.co",
+                    "readable": true,
+                    "totalEvents": 1250
+                  },
+                  "cache": {
+                    "estadisticas": true,
+                    "eventos": false
+                  },
+                  "uptime": 3600,
+                  "memory": {
+                    "used": 45,
+                    "total": 128,
+                    "unit": "MB"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stats": {
+      "get": {
+        "tags": ["Estadísticas"],
+        "summary": "Estadísticas en tiempo real",
+        "description": "Retorna estadísticas globales del sistema con datos desde caché (30s TTL) o base de datos. Incluye total de detecciones, infracciones y velocidad promedio",
+        "responses": {
+          "200": {
+            "description": "Estadísticas del sistema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Statistics"
+                },
+                "example": {
+                  "totalDetecciones": 1250,
+                  "totalInfracciones": 89,
+                  "porcentajeInfracciones": 7.12,
+                  "velocidadPromedio": 54.3,
+                  "timestamp": "2025-10-31T12:00:00.000Z",
+                  "cached": true,
+                  "cacheAge": "15s"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor (se retorna fallback desde caché en memoria)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/eventos/recientes": {
+      "get": {
+        "tags": ["Eventos"],
+        "summary": "Últimos eventos de tráfico",
+        "description": "Retorna una lista de los eventos de tráfico más recientes, ordenados por fecha de recepción descendente",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Número de eventos a retornar (min: 1, max: 100, default: 10)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de eventos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TrafficEvent"
+                  }
+                },
+                "example": [
+                  {
+                    "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "dispositivo_id": "ESP32-001",
+                    "velocidad": 78.5,
+                    "direccion": "norte",
+                    "es_infraccion": true,
+                    "timestamp": "2025-10-31T12:00:00.000Z",
+                    "ubicacion": {
+                      "lat": -0.9549,
+                      "lng": -80.7288,
+                      "nombre": "Av. Principal"
+                    },
+                    "limite_velocidad": 50,
+                    "procesado": false,
+                    "recibido_en": "2025-10-31T12:00:01.000Z"
+                  }
+                ]
+              }
+            }
+          },
+          "500": {
+            "description": "Error al obtener eventos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/generar-reporte": {
+      "get": {
+        "tags": ["Reportes"],
+        "summary": "Generar reporte diario",
+        "description": "Genera un reporte estadístico para una fecha específica, calculando detecciones, infracciones y métricas de velocidad. El reporte se guarda en la base de datos",
+        "parameters": [
+          {
+            "name": "fecha",
+            "in": "query",
+            "description": "Fecha del reporte en formato YYYY-MM-DD (default: hoy)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date",
+              "example": "2025-10-31"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reporte generado exitosamente",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyReport"
+                },
+                "example": {
+                  "success": true,
+                  "fecha": "2025-10-31",
+                  "total_detecciones": 450,
+                  "total_infracciones": 32,
+                  "porcentaje_infracciones": 7.11,
+                  "velocidad_promedio": 56.8,
+                  "velocidad_maxima": 95.0,
+                  "velocidad_minima": 20.0,
+                  "direcciones": {
+                    "norte": 245,
+                    "sur": 205
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error al generar el reporte",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/reportes": {
+      "get": {
+        "tags": ["Reportes"],
+        "summary": "Obtener reportes históricos",
+        "description": "Retorna una lista de reportes diarios guardados, ordenados por fecha descendente",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Número de reportes a retornar (min: 1, max: 90, default: 30)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90,
+              "default": 30
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de reportes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DailyReport"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error al obtener reportes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eventos": {
+      "get": {
+        "tags": ["Dashboard API"],
+        "summary": "Eventos para dashboard",
+        "description": "Retorna eventos formateados específicamente para consumo del dashboard frontend",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Número de eventos a retornar (min: 1, max: 500, default: 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lista de eventos formateados",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DashboardEvent"
+                  }
+                },
+                "example": [
+                  {
+                    "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "timestamp": 1730376000000,
+                    "velocidad": 78.5,
+                    "direccion": "norte",
+                    "ubicacion": {
+                      "lat": -0.9549,
+                      "lng": -80.7288,
+                      "nombre": "Av. Principal"
+                    },
+                    "esInfraccion": true,
+                    "limiteVelocidad": 50,
+                    "fecha": "2025-10-31T12:00:00.000Z",
+                    "dispositivo_id": "ESP32-001"
+                  }
+                ]
+              }
+            }
+          },
+          "500": {
+            "description": "Error al obtener eventos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/estadisticas": {
+      "get": {
+        "tags": ["Dashboard API"],
+        "summary": "Estadísticas para dashboard",
+        "description": "Retorna estadísticas calculadas sobre los últimos 50 eventos, optimizado para dashboard con caché de 30s",
+        "responses": {
+          "200": {
+            "description": "Estadísticas del dashboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardStats"
+                },
+                "example": {
+                  "totalDetecciones": 1250,
+                  "velocidadPromedio": 65,
+                  "totalInfracciones": 89,
+                  "porcentajeInfracciones": 7,
+                  "ultimaActualizacion": "2025-10-31T12:00:00.000Z"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error (retorna fallback desde caché en memoria)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardStats"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/graficos": {
+      "get": {
+        "tags": ["Dashboard API"],
+        "summary": "Datos para gráficos",
+        "description": "Retorna datos agrupados por hora de las últimas 24 horas para visualización en gráficos. Incluye detecciones, infracciones y velocidad promedio por hora",
+        "responses": {
+          "200": {
+            "description": "Datos de gráficos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChartData"
+                  }
+                },
+                "example": [
+                  {
+                    "hora": "10:00",
+                    "detecciones": 45,
+                    "infracciones": 3,
+                    "velocidadPromedio": 58
+                  },
+                  {
+                    "hora": "11:00",
+                    "detecciones": 52,
+                    "infracciones": 5,
+                    "velocidadPromedio": 62
+                  }
+                ]
+              }
+            }
+          },
+          "500": {
+            "description": "Error al obtener datos de gráficos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthCheck": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "SIAV Backend Running"
+          },
+          "version": {
+            "type": "string",
+            "example": "2.0.0"
+          },
+          "database": {
+            "type": "string",
+            "example": "Supabase PostgreSQL"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mqtt": {
+            "type": "object",
+            "properties": {
+              "connected": {
+                "type": "boolean"
+              },
+              "broker": {
+                "type": "string"
+              },
+              "topic": {
+                "type": "string"
+              }
+            }
+          },
+          "supabase": {
+            "type": "object",
+            "properties": {
+              "connected": {
+                "type": "boolean"
+              },
+              "url": {
+                "type": "string"
+              },
+              "readable": {
+                "type": "boolean"
+              },
+              "totalEvents": {
+                "type": "integer"
+              }
+            }
+          },
+          "cache": {
+            "type": "object",
+            "properties": {
+              "estadisticas": {
+                "type": "boolean"
+              },
+              "eventos": {
+                "type": "boolean"
+              }
+            }
+          },
+          "uptime": {
+            "type": "integer",
+            "description": "Tiempo de actividad en segundos"
+          },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "used": {
+                "type": "integer"
+              },
+              "total": {
+                "type": "integer"
+              },
+              "unit": {
+                "type": "string",
+                "example": "MB"
+              }
+            }
+          }
+        }
+      },
+      "Statistics": {
+        "type": "object",
+        "properties": {
+          "totalDetecciones": {
+            "type": "integer",
+            "description": "Total de vehículos detectados"
+          },
+          "totalInfracciones": {
+            "type": "integer",
+            "description": "Total de infracciones registradas"
+          },
+          "porcentajeInfracciones": {
+            "type": "number",
+            "format": "float",
+            "description": "Porcentaje de infracciones respecto al total"
+          },
+          "velocidadPromedio": {
+            "type": "number",
+            "format": "float",
+            "description": "Velocidad promedio en km/h"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cached": {
+            "type": "boolean",
+            "description": "Indica si los datos vienen del caché"
+          },
+          "cacheAge": {
+            "type": "string",
+            "description": "Edad del caché (solo si cached=true)"
+          },
+          "fallback": {
+            "type": "boolean",
+            "description": "Indica si se usó el fallback de memoria"
+          }
+        }
+      },
+      "TrafficEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "dispositivo_id": {
+            "type": "string",
+            "description": "ID del dispositivo que reportó el evento"
+          },
+          "velocidad": {
+            "type": "number",
+            "format": "float",
+            "description": "Velocidad detectada en km/h"
+          },
+          "direccion": {
+            "type": "string",
+            "enum": ["norte", "sur"],
+            "description": "Dirección del vehículo"
+          },
+          "es_infraccion": {
+            "type": "boolean",
+            "description": "Indica si es una infracción"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Fecha y hora del evento"
+          },
+          "ubicacion": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "lat": {
+                "type": "number",
+                "format": "float"
+              },
+              "lng": {
+                "type": "number",
+                "format": "float"
+              },
+              "nombre": {
+                "type": "string"
+              }
+            }
+          },
+          "limite_velocidad": {
+            "type": "integer",
+            "description": "Límite de velocidad en km/h"
+          },
+          "procesado": {
+            "type": "boolean",
+            "description": "Indica si el evento fue procesado"
+          },
+          "recibido_en": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Fecha y hora de recepción en el servidor"
+          }
+        }
+      },
+      "DailyReport": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "fecha": {
+            "type": "string",
+            "format": "date"
+          },
+          "total_detecciones": {
+            "type": "integer"
+          },
+          "total_infracciones": {
+            "type": "integer"
+          },
+          "porcentaje_infracciones": {
+            "type": "number",
+            "format": "float"
+          },
+          "velocidad_promedio": {
+            "type": "number",
+            "format": "float"
+          },
+          "velocidad_maxima": {
+            "type": "number",
+            "format": "float"
+          },
+          "velocidad_minima": {
+            "type": "number",
+            "format": "float"
+          },
+          "direcciones": {
+            "type": "object",
+            "properties": {
+              "norte": {
+                "type": "integer"
+              },
+              "sur": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "DashboardEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "timestamp": {
+            "type": "integer",
+            "description": "Timestamp en milisegundos"
+          },
+          "velocidad": {
+            "type": "number",
+            "format": "float"
+          },
+          "direccion": {
+            "type": "string"
+          },
+          "ubicacion": {
+            "type": "object",
+            "properties": {
+              "lat": {
+                "type": "number"
+              },
+              "lng": {
+                "type": "number"
+              },
+              "nombre": {
+                "type": "string"
+              }
+            }
+          },
+          "esInfraccion": {
+            "type": "boolean"
+          },
+          "limiteVelocidad": {
+            "type": "integer"
+          },
+          "fecha": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "dispositivo_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DashboardStats": {
+        "type": "object",
+        "properties": {
+          "totalDetecciones": {
+            "type": "integer"
+          },
+          "velocidadPromedio": {
+            "type": "integer"
+          },
+          "totalInfracciones": {
+            "type": "integer"
+          },
+          "porcentajeInfracciones": {
+            "type": "integer"
+          },
+          "ultimaActualizacion": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fallback": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ChartData": {
+        "type": "object",
+        "properties": {
+          "hora": {
+            "type": "string",
+            "example": "10:00"
+          },
+          "detecciones": {
+            "type": "integer"
+          },
+          "infracciones": {
+            "type": "integer"
+          },
+          "velocidadPromedio": {
+            "type": "integer"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
